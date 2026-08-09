@@ -1834,17 +1834,17 @@ re2js/build/index.js:
   }
 
   // vignette légère : la preview complète alourdirait l'ouverture du catalogue
-  function miniature(b64) {
+  function miniature(b64, taille, qualite) {
     return new Promise(res => {
       if (!b64) return res("");
       const im = new Image();
       im.onload = () => {
         try {
-          const e = Math.min(1, 300 / Math.max(im.width, im.height));
+          const e = Math.min(1, (taille || 300) / Math.max(im.width, im.height));
           const cv = document.createElement("canvas");
           cv.width = Math.round(im.width * e); cv.height = Math.round(im.height * e);
           cv.getContext("2d").drawImage(im, 0, 0, cv.width, cv.height);
-          res(cv.toDataURL("image/jpeg", 0.6).split(",")[1]);
+          res(cv.toDataURL("image/jpeg", qualite || 0.6).split(",")[1]);
         } catch (x) { res(""); }
       };
       im.onerror = () => res("");
@@ -1858,7 +1858,9 @@ re2js/build/index.js:
       throw new Error("ce n'est pas un fichier projet String Art");
     const nom = d.name || nomFichier.replace(/\.json$/i, "");
     const id = "c" + Date.now() + Math.floor(Math.random() * 1000);
-    const vignette = await miniature(d.preview_jpeg_b64 || d.photo_jpeg_b64);
+    const vignette = await miniature(d.preview_jpeg_b64 || d.photo_jpeg_b64, 300, 0.6);
+    const apPrev  = await miniature(d.preview_jpeg_b64, 900, 0.72);
+    const apPhoto = await miniature(d.photo_jpeg_b64, 900, 0.72);
     const morceaux = [];
     for (let i = 0; i < texte.length; i += MORCEAU)
       morceaux.push(texte.slice(i, i + MORCEAU));
@@ -1872,6 +1874,9 @@ re2js/build/index.js:
     });
     morceaux.forEach((t, i) =>
       lot.set(FB.doc(FB.db, "catalogue", id, "data", String(i)), { t }));
+    // images moyennes, chargées seulement quand quelqu'un demande l'aperçu
+    lot.set(FB.doc(FB.db, "catalogue", id, "apercu", "1"),
+            { preview: apPrev || "", photo: apPhoto || "" });
     await lot.commit();
     return nom;
   }
@@ -1914,7 +1919,8 @@ re2js/build/index.js:
                  : ["pris", "Pris par " + (it.prisParNom || "?")];
       let info = `${it.format ? it.format + " cm · " : ""}${it.pas} étapes · ${it.clous} clous`;
       if (it.statut !== "disponible" && it.avancement)
-        info += `<br>pas ${it.avancement} sur ${it.pas} (${Math.round(it.avancement / it.pas * 100)} %)`;
+        info += `<br>pas ${it.avancement} sur ${it.pas} (${Math.round(it.avancement / it.pas * 100)} %)`
+              + ` · ${depuis(it.avancementLe)}`;
       c.innerHTML = `<div class="nom"></div><div class="info">${info}</div>`
                   + `<span class="etat ${etat[0]}">${etat[1]}</span>`;
       c.querySelector(".nom").textContent = it.nom || "projet";
@@ -1954,10 +1960,17 @@ re2js/build/index.js:
           charge();
         }));
       }
+      a.appendChild(bouton("Renommer", async () => {
+        const v = prompt("Nouveau nom du projet :", it.nom || "");
+        if (v === null || !v.trim()) return;
+        await FB.updateDoc(refCat(it.id), { nom: v.trim() });
+        charge();
+      }));
       a.appendChild(bouton("Supprimer", async () => {
         if (!confirm(`Supprimer définitivement « ${it.nom} » du catalogue ?`)) return;
         for (let i = 0; i < (it.morceaux || 1); i++)
           await FB.deleteDoc(FB.doc(FB.db, "catalogue", it.id, "data", String(i))).catch(() => {});
+        await FB.deleteDoc(FB.doc(FB.db, "catalogue", it.id, "apercu", "1")).catch(() => {});
         await FB.deleteDoc(refCat(it.id));
         charge();
       }));
@@ -1965,6 +1978,17 @@ re2js/build/index.js:
       l.append(img, c);
       box.appendChild(l);
     }
+  }
+
+  // "il y a 3 jours" a partir d'un horodatage Firestore
+  function depuis(ts) {
+    if (!ts || !ts.toMillis) return "date inconnue";
+    const j = Math.floor((Date.now() - ts.toMillis()) / 86400000);
+    if (j <= 0) return "mis à jour aujourd'hui";
+    if (j === 1) return "mis à jour hier";
+    if (j < 31) return `mis à jour il y a ${j} jours`;
+    const m = Math.floor(j / 30);
+    return `mis à jour il y a ${m} mois`;
   }
 
   function bouton(txt, fn) {
