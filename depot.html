@@ -49,6 +49,10 @@
     overflow:hidden; max-width:320px;}
   .jauge div{height:100%; background:var(--vert);}
   .err{color:var(--rouge);} .ok{color:var(--vert);}
+  #onglets{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px;}
+  #onglets button{font-size:14px; padding:8px 15px;}
+  #onglets button.on{background:var(--bleu); color:#111; font-weight:600;}
+  #onglets button.part{margin-left:auto;}
   select{font:inherit; background:var(--panel2); color:var(--txt);
     border:1px solid #3a3e46; border-radius:8px; padding:8px;}
 </style>
@@ -82,7 +86,10 @@
 
     <h2>Catalogue <button id="recharger" style="font-size:13px; padding:6px 12px;
       margin-left:8px;">Actualiser</button></h2>
-    <div class="carte"><div id="liste"><p class="note">Chargement…</p></div></div>
+    <div class="carte">
+      <div id="onglets"></div>
+      <div id="liste"><p class="note">Chargement…</p></div>
+    </div>
   </div>
 </div>
 
@@ -1759,7 +1766,7 @@ re2js/build/index.js:
   const DOMAINE = "@stringart.local";
   const MORCEAU = 300000;           // même découpage que l'application
 
-  let annuaire = {}, catalogue = [];
+  let annuaire = {}, catalogue = [], onglet = "*";
   const moi = () => FB.auth.currentUser;
   const refCat = id => FB.doc(FB.db, "catalogue", id);
 
@@ -1898,14 +1905,54 @@ re2js/build/index.js:
   }
   $("recharger").addEventListener("click", charge);
 
+  // mêmes onglets que dans l'application : formats, puis les deux vues
+  // transverses. Le compteur donne le nombre de tableaux par catégorie.
+  function rendOnglets() {
+    const box = $("onglets");
+    box.innerHTML = "";
+    const actifs = catalogue.filter(x => x.statut !== "termine");
+    const formats = [...new Set(actifs.map(x => x.format || "Autre"))].sort();
+    const liste = [["*", "Tous", actifs.length]];
+    for (const f of formats)
+      liste.push([f, f, actifs.filter(x => (x.format || "Autre") === f).length]);
+    liste.push(["@cours", "En cours", catalogue.filter(x => x.statut === "pris").length]);
+    liste.push(["@finis", "Terminés", catalogue.filter(x => x.statut === "termine").length]);
+    if (!liste.some(l => l[0] === onglet)) onglet = "*";
+    for (const [cle, lib, n] of liste) {
+      const b = document.createElement("button");
+      b.textContent = lib + (n ? "\u00a0" + n : "");
+      if (cle === onglet) b.classList.add("on");
+      if (cle === "@cours") b.classList.add("part");
+      b.addEventListener("click", () => { onglet = cle; rend(); });
+      box.appendChild(b);
+    }
+  }
+
+  function filtre(it) {
+    if (onglet === "@cours") return it.statut === "pris";
+    if (onglet === "@finis") return it.statut === "termine";
+    if (it.statut === "termine") return false;
+    return onglet === "*" || (it.format || "Autre") === onglet;
+  }
+
   function rend() {
     const box = $("liste");
     box.innerHTML = "";
+    rendOnglets();
     if (!catalogue.length) {
       box.innerHTML = '<p class="note">Le catalogue est vide.</p>';
       return;
     }
-    for (const it of catalogue) {
+    let vus = catalogue.filter(filtre);
+    if (onglet === "@cours")
+      vus.sort((a, b) => msDe(a.avancementLe) - msDe(b.avancementLe));
+    if (onglet === "@finis")
+      vus.sort((a, b) => msDe(b.finiLe) - msDe(a.finiLe));
+    if (!vus.length) {
+      box.innerHTML = '<p class="note">Aucun tableau dans cette catégorie.</p>';
+      return;
+    }
+    for (const it of vus) {
       const l = document.createElement("div");
       l.className = "ligne";
       const img = document.createElement("img");
@@ -1921,6 +1968,9 @@ re2js/build/index.js:
       if (it.statut !== "disponible" && it.avancement)
         info += `<br>pas ${it.avancement} sur ${it.pas} (${Math.round(it.avancement / it.pas * 100)} %)`
               + ` · ${depuis(it.avancementLe)}`;
+      if (it.statut === "termine")
+        info += `<br>pris le ${dateCourte(it.prisLe)}, fini le ${dateCourte(it.finiLe)}`
+              + (it.tissageMs ? `<br><b>${duree(it.tissageMs)} de tissage effectif</b>` : "");
       c.innerHTML = `<div class="nom"></div><div class="info">${info}</div>`
                   + `<span class="etat ${etat[0]}">${etat[1]}</span>`;
       c.querySelector(".nom").textContent = it.nom || "projet";
@@ -1960,6 +2010,11 @@ re2js/build/index.js:
           charge();
         }));
       }
+      if (it.statut === "termine")
+        a.appendChild(bouton("Remettre en cours", async () => {
+          await FB.updateDoc(refCat(it.id), { statut: "pris", finiLe: null });
+          charge();
+        }));
       a.appendChild(bouton("Renommer", async () => {
         const v = prompt("Nouveau nom du projet :", it.nom || "");
         if (v === null || !v.trim()) return;
@@ -1978,6 +2033,23 @@ re2js/build/index.js:
       l.append(img, c);
       box.appendChild(l);
     }
+  }
+
+  const msDe = t => (t && t.toMillis) ? t.toMillis() : 0;
+
+  function dateCourte(t) {
+    const v = msDe(t);
+    if (!v) return "date inconnue";
+    return new Date(v).toLocaleDateString("fr-BE",
+      { day: "numeric", month: "short", year: "numeric" });
+  }
+
+  // temps réellement passé à tisser, pauses exclues
+  function duree(ms) {
+    const h = Math.floor(ms / 3600000), m = Math.round(ms % 3600000 / 60000);
+    if (!h && !m) return "moins d'une minute";
+    if (!h) return m + " min";
+    return h + " h " + String(m).padStart(2, "0");
   }
 
   // "il y a 3 jours" a partir d'un horodatage Firestore
